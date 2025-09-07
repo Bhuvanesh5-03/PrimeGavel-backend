@@ -215,7 +215,7 @@ const io = new Server(server, {
 });
 
 const auctions = new Map();
-const DEFAULT_TIMER = 30;
+const DEFAULT_TIMER = 10;
 
 io.on("connection", (socket) => {
   console.log(`⚡ User connected: ${socket.id}`);
