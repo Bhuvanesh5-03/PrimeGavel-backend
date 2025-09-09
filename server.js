@@ -31,7 +31,7 @@ app.post('/traderSignup', async (req, res) => {
     const db = await connect.db('login');
     data.code = "";
     data.isLogging = false;
-    data.pastAuction = []; // <-- Key fix
+    data.pastAuction = []; 
     const user = await db.collection('traderlogin').findOne({ emailid: data.emailid });
     if (user) {
       return res.status(400).send({ message: "User already exists", success: false });
@@ -39,7 +39,6 @@ app.post('/traderSignup', async (req, res) => {
     const insert = await db.collection('traderlogin').insertOne(data);
     if (insert.acknowledged) {
       res.send({ message: "SignUp Successfully", success: true });
-      // ... welcome mail logic (unchanged)
       return;
     }
     return res.status(500).send({ message: "failed to insert", success: false });
@@ -47,6 +46,7 @@ app.post('/traderSignup', async (req, res) => {
     res.status(500).send({ message: "Error" });
   }
 });
+
 app.post('/auctionDetail', async (req, res) => {
   try {
     const data = req.body;
@@ -81,16 +81,13 @@ app.get('/Count', async (req, res) => {
     res.status(500).send(err);
   }
 });
-// 📩 Contact Form Route
+
 app.post('/contact', async (req, res) => {
   try {
     const { name, email, message } = req.body;
-
     if (!name || !email || !message) {
       return res.status(400).json({ success: false, message: "All fields are required" });
     }
-
-    // ✅ Save to MongoDB
     const connect = await dbconnect();
     await connect.db('Auction').collection('ContactMessages').insertOne({
       name,
@@ -99,17 +96,12 @@ app.post('/contact', async (req, res) => {
       date: new Date(),
     });
 
-    // ✅ Send styled HTML email using Handlebars template
     const mail = {
       from: process.env.USER_NAME,
-      to: process.env.USER_NAME, // Admin email (receiver)
+      to: process.env.USER_NAME,
       subject: "📩 New Contact Form Message - PrimeGavel",
-      template: "contact", 
-      context: {           
-        name,
-        email,
-        message
-      }
+      template: "contact",
+      context: { name, email, message }
     };
 
     transporter.sendMail(mail, (err) => {
@@ -129,14 +121,6 @@ app.post('/contact', async (req, res) => {
 
 app.get('/AuctionPage', verifyToken, async (req, res) => {
   try {
-    const now = new Date();
-    const auctionStartTime = new Date(now);
-    auctionStartTime.setHours(8, 0, 0, 0); // Set to 8:00 AM today
-
-    if (now < auctionStartTime) {
-      return res.json({ success: false, noAuction: true, message: "Auction starts at 8:00 AM. Please check back later." });
-    }
-
     const database = await dbconnect();
     const auctionData = await database
       .db('Auction')
@@ -145,7 +129,7 @@ app.get('/AuctionPage', verifyToken, async (req, res) => {
 
     if (auctionData) {
       const mappedItems = auctionData.items
-        .filter(item => !item.Winner) // Skip items with existing winner
+        .filter(item => !item.Winner)
         .map(item => ({
           lotNumber: `lot-${item.LotNo}`,
           productName: item.ProductName,
@@ -170,16 +154,12 @@ app.get('/AuctionPage', verifyToken, async (req, res) => {
 
 app.post('/Winners', verifyToken, async (req, res) => {
   try {
-    // ✅ Correct way to get email
     const userEmail = req.body.emailid || req.userData?.emailid;
-
     if (!userEmail) {
       return res.status(400).json({ success: false, message: "Email not provided" });
     }
-
     const database = await dbconnect();
     const user = await database.db('login').collection('traderlogin').findOne({ emailid: userEmail });
-
     if (user) {
       const pastAuction = Array.isArray(user.pastAuction) ? user.pastAuction : [];
       console.log("Past Winnings:", pastAuction);
@@ -191,6 +171,7 @@ app.post('/Winners', verifyToken, async (req, res) => {
     res.status(500).json({ success: false, message: err.message });
   }
 });
+
 app.get('/TodayAuction', verifyToken, async (req, res) => {
   try {
     const database = await dbconnect();
@@ -215,6 +196,7 @@ const io = new Server(server, {
 });
 
 const auctions = new Map();
+const auctionParticipants = new Map(); // Store auctionId -> Set of trader names
 const DEFAULT_TIMER = 10;
 
 io.on("connection", (socket) => {
@@ -223,7 +205,15 @@ io.on("connection", (socket) => {
   socket.on("auction:join", async ({ auctionId, name }) => {
     socket.join(auctionId);
 
-    if (!auctions.has(auctionId)) {
+    if (!auctionParticipants.has(auctionId)) {
+      auctionParticipants.set(auctionId, new Set());
+    }
+    const participants = auctionParticipants.get(auctionId);
+    participants.add(name);
+
+    io.to(auctionId).emit("auction:participants", { count: participants.size });
+
+    if (!auctions.has(auctionId) && participants.size >= 2) {
       try {
         const database = await dbconnect();
         const auctionData = await database
@@ -233,7 +223,7 @@ io.on("connection", (socket) => {
 
         if (auctionData) {
           const items = auctionData.items
-            .filter(item => !item.Winner) // Skip items with existing winner
+            .filter(item => !item.Winner)
             .map(item => ({
               lotNumber: `lot-${item.LotNo}`,
               productName: item.ProductName,
@@ -254,6 +244,7 @@ io.on("connection", (socket) => {
               ended: false,
               interval: setInterval(() => tick(auctionId), 1000)
             });
+            console.log(`🚀 Auction ${auctionId} started with ${participants.size} participants.`);
           } else {
             socket.emit("auction:error", { message: "Auction ID not found or already has a winner" });
             return;
@@ -268,34 +259,15 @@ io.on("connection", (socket) => {
         return;
       }
     }
-
-    const state = auctions.get(auctionId);
-    if (state.ended) {
-      socket.emit("auction:end", {
-        timeLeft: 0,
-        currentBid: state.currentBid,
-        highestBidder: state.highestBidder
-      });
-    } else {
-      socket.emit("auction:state", {
-        timeLeft: state.timer,
-        currentBid: state.currentBid,
-        highestBidder: state.highestBidder,
-        increment: 2,
-        ended: state.ended
-      });
-    }
   });
 
   socket.on("auction:bid", ({ auctionId, bidder, increment }) => {
     if (!auctions.has(auctionId)) return;
-
     const state = auctions.get(auctionId);
     if (state.ended) {
       socket.emit("auction:error", { message: "Auction has ended" });
       return;
     }
-
     const newBid = state.currentBid + increment;
     if (newBid > state.currentBid) {
       state.currentBid = newBid;
@@ -312,6 +284,17 @@ io.on("connection", (socket) => {
     } else {
       socket.emit("auction:error", { message: "Your bid must be higher than current amount" });
     }
+  });
+
+  socket.on("disconnecting", () => {
+    const rooms = socket.rooms;
+    rooms.forEach((room) => {
+      if (auctionParticipants.has(room)) {
+        const participants = auctionParticipants.get(room);
+        participants.delete(socket.id);
+        io.to(room).emit("auction:participants", { count: participants.size });
+      }
+    });
   });
 
   socket.on("disconnect", () => {
@@ -345,8 +328,6 @@ async function tick(auctionId) {
     try {
       const database = await dbconnect();
       const lotNo = parseInt(auctionId.replace('lot-', ''));
-
-      // Update winner in AuctionDetail
       await database
         .db('Auction')
         .collection("AuctionDetail")
@@ -361,14 +342,11 @@ async function tick(auctionId) {
         );
       console.log(`Saved winner for ${auctionId} to DB`);
 
-      // If there is a winner, update trader's pastAuction and send email
       if (state.highestBidder) {
-        // Fetch the item details
         const auctionData = await database
           .db('Auction')
           .collection("AuctionDetail")
           .findOne({ auction_date: currentDate });
-
         if (auctionData) {
           const item = auctionData.items.find(i => i.LotNo === lotNo);
           if (item) {
@@ -383,7 +361,6 @@ async function tick(auctionId) {
               auctionDate: currentDate
             };
 
-
             await database
               .db('login')
               .collection('traderlogin')
@@ -393,7 +370,6 @@ async function tick(auctionId) {
               );
             console.log(`Updated pastAuction for trader ${state.highestBidder}`);
 
-            // Send win notification email
             const mail = {
               from: process.env.USER_NAME,
               to: state.highestBidder,
